@@ -1,0 +1,174 @@
+#### AWS SAM Template. Please replace the parameters where you see <replace-me> text
+AWSTemplateFormatVersion: 2010-09-09
+Transform:
+  - AWS::Serverless-2016-10-31
+
+# Template Information
+
+Description: "Nuxt 3 Website Hosted in S3 and Cloudfront"
+
+# Template Parameters
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: "The domain name of website"
+    Default: <replace-me>    # Replace me
+  HostedZoneId:
+    Type: String
+    Description: "The Route53 hosted zone ID used for the domain"
+    Default: <replace-me> # Replace me
+  AcmCertificateArn:
+    Type: String
+    Description: "The certificate arn for the domain name provided"
+    Default: <replace-me> # Replace me
+  IndexDocument:
+    Type: String
+    Description: "The index document"
+    Default: "index.html"
+  ErrorDocument:
+    Type: String
+    Description: "The error document, ignored in SPA mode"
+    Default: "404.html"
+  RewriteMode:
+    Type: String
+    Description: "The request rewrite behaviour type"
+    Default: "STATIC"
+    AllowedValues:
+      - STATIC
+      - SPA
+  CloudFrontPriceClass:
+    Type: String
+    Description: "The price class for CloudFront distribution"
+    Default: "PriceClass_100"
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+
+
+# Resources create conditions
+
+Conditions:
+  IsStaticMode: !Equals [!Ref RewriteMode, "STATIC"]
+  IsSPAMode: !Equals [!Ref RewriteMode, "SPA"]
+
+# Template Resources
+
+Resources:
+
+  DnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt Distribution.DomainName
+        HostedZoneId: "Z2FDTNDATAQYW2" # CloudFront
+  
+  Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DomainName
+      AccessControl: Private
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Bucket
+      PolicyDocument: 
+        Statement: 
+          - Effect: "Allow"
+            Action: "s3:GetObject"
+            Resource: !Sub "arn:aws:s3:::${Bucket}/*"
+            Principal: 
+              AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${OriginAccessIdentity}'
+
+  OriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref AWS::StackName
+
+  RewriteRequestStaticFunction:
+    Condition: IsStaticMode
+    Type: AWS::CloudFront::Function
+    Properties: 
+      Name: !Sub "${AWS::StackName}-req-static"
+      AutoPublish: true
+      FunctionCode: !Sub |
+        function handler(event) {
+          var request = event.request;
+          var uri = request.uri
+          if (uri.endsWith('/')) {
+              request.uri += '${IndexDocument}';
+          } else if (!uri.includes('.')) {
+              request.uri += '/${IndexDocument}';
+          }
+          return request;
+        }
+      FunctionConfig: 
+        Comment: !Sub "rewrite all paths to /${IndexDocument}"
+        Runtime: cloudfront-js-1.0
+
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Ref AWS::StackName
+        DefaultRootObject: !Ref IndexDocument
+        HttpVersion: http2
+        CustomErrorResponses:
+          - ErrorCachingMinTTL: 86400
+            ErrorCode: 403 # object not found in bucket, then return 404 status with 404.html file
+            ResponseCode: 404
+            ResponsePagePath: !Sub "/${ErrorDocument}"
+        Origins:
+          - DomainName: !Sub "${Bucket}.s3.${AWS::Region}.amazonaws.com"
+            Id: bucketOrigin
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentity}
+        DefaultCacheBehavior:
+          Compress: true
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          TargetOriginId: bucketOrigin
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+          ViewerProtocolPolicy: redirect-to-https
+          FunctionAssociations:
+            - EventType: viewer-request
+              FunctionARN: !GetAtt RewriteRequestStaticFunction.FunctionMetadata.FunctionARN
+              # FunctionARN: !If [IsStaticMode, !GetAtt RewriteRequestStaticFunction.FunctionMetadata.FunctionARN, !GetAtt RewriteRequestSpaFunction.FunctionMetadata.FunctionARN]
+        PriceClass: !Ref CloudFrontPriceClass
+        Aliases:
+          - !Ref DomainName
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+
+# Template Outputs
+
+Outputs:
+  BucketName:
+    Description: "The S3 bucket name where HTML files need to be uploaded"
+    Value: !Ref Bucket
+  CloudFrontDistribution:
+    Description: "The CloudFront distribution in front of the S3 bucket"
+    Value: !Ref Distribution
+  WebsiteUrl:
+    Description: "The website URL"
+    Value: !Sub "https://${DomainName}/"
+
